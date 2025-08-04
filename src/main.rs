@@ -82,7 +82,9 @@ fn process(root: &Path, opts: Options) -> Result<()> {
     let home = PathBuf::from(std::env::var("HOME").context("HOME must be set")?);
     let lua = Lua::new();
 
-    fn walk_dir(root: &Path, rel: &Path, home: &Path, lua: &Lua, opts: Options) -> Result<()> {
+    #[derive(Default)]
+    struct WalkCounts { planned: usize, conflicts: usize, skips: usize }
+    fn walk_dir(root: &Path, rel: &Path, home: &Path, lua: &Lua, opts: Options) -> Result<WalkCounts> {
         let mut planned: usize = 0;
         let mut conflicts: usize = 0;
         let mut skips: usize = 0;
@@ -100,7 +102,10 @@ fn process(root: &Path, opts: Options) -> Result<()> {
 
             if path.is_dir() {
                 // Recurse into directories
-                walk_dir(root, &rel_path, home, lua, opts)?;
+                let sub = walk_dir(root, &rel_path, home, lua, opts)?;
+                planned += sub.planned;
+                conflicts += sub.conflicts;
+                skips += sub.skips;
                 continue;
             }
 
@@ -184,21 +189,20 @@ fn process(root: &Path, opts: Options) -> Result<()> {
                 planned += 1;
             }
         }
-        if rel.as_os_str().is_empty() {
-            let conflicts_label = if conflicts == 1 { "conflict" } else { "conflicts" };
-            let planned_label = if planned == 1 { "planned" } else { "planned" }; // same word reads fine
-            let skipped_label = if skips == 1 { "skipped by lua" } else { "skipped by lua" }; // keep phrase
-            println!(
-                "\nSummary: {} {}, {} {}, {} {}",
-                opts.color.green(&planned.to_string()), planned_label,
-                opts.color.red(&conflicts.to_string()), conflicts_label,
-                opts.color.blue(&skips.to_string()), skipped_label
-            );
-        }
-        Ok(())
+        Ok(WalkCounts { planned, conflicts, skips })
     }
 
-    walk_dir(root, Path::new(""), &home, &lua, opts)
+    let totals = walk_dir(root, Path::new(""), &home, &lua, opts)?;
+    let conflicts_label = if totals.conflicts == 1 { "conflict" } else { "conflicts" };
+    let planned_label = if totals.planned == 1 { "planned" } else { "planned" };
+    let skipped_label = if totals.skips == 1 { "skipped by lua" } else { "skipped by lua" };
+    println!(
+        "\nSummary: {} {}, {} {}, {} {}",
+        opts.color.green(&totals.planned.to_string()), planned_label,
+        opts.color.red(&totals.conflicts.to_string()), conflicts_label,
+        opts.color.blue(&totals.skips.to_string()), skipped_label
+    );
+    Ok(())
 }
 
 fn main() -> Result<()> {
