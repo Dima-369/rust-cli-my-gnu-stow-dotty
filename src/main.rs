@@ -44,9 +44,6 @@ impl Colorize {
     fn yellow(&self, s: &str) -> String {
         if self.0 { format!("\x1b[33m{s}\x1b[0m") } else { s.to_string() }
     }
-    fn magenta(&self, s: &str) -> String {
-        if self.0 { format!("\x1b[35m{s}\x1b[0m") } else { s.to_string() }
-    }
 }
 
 #[derive(Parser, Debug)]
@@ -212,30 +209,41 @@ fn process(root: &Path, opts: Options) -> Result<()> {
                         if target.exists() || target.is_symlink() {
                             // If --dry-run, compare file contents where possible and report if identical
                             let mut state = String::new();
-                            let mut identical = false;
-                            {
-                                let check = (|| -> Result<bool> {
-                                    let meta = fs::symlink_metadata(&target).ok();
-                                    if let Some(m) = meta {
-                                        if m.file_type().is_symlink() {
-                                            if let Ok(link_target) = fs::read_link(&target) {
-                                                if link_target == path {
-                                                    return Ok(true);
-                                                }
+                            let identical: bool = (|| -> bool {
+                                let meta = fs::symlink_metadata(&target).ok();
+                                if let Some(m) = meta {
+                                    if m.file_type().is_symlink() {
+                                        if let Ok(link_target) = fs::read_link(&target) {
+                                            if link_target == path {
+                                                return true;
                                             }
                                         }
                                     }
-                                    if target.is_file() && path.is_file() {
-                                        if let (Ok(a), Ok(b)) = (fs::read(&target), fs::read(&path)) {
-                                            return Ok(a == b);
-                                        }
+                                }
+                                if target.is_file() && path.is_file() {
+                                    if let (Ok(a), Ok(b)) = (fs::read(&target), fs::read(&path)) {
+                                        return a == b;
                                     }
-                                    Ok(false)
-                                })().unwrap_or(false);
+                                }
+                                false
+                            })();
+                            if opts.dry_run {
                                 if identical {
                                     state = opts.color.green("identical");
                                 } else {
                                     state = opts.color.yellow("differs");
+                                }
+                            }
+                            if opts.override_identical && identical && !opts.dry_run {
+                                if target.is_dir() {
+                                    // don't remove directories implicitly
+                                } else {
+                                    let _ = fs::remove_file(&target);
+                                    unix_fs::symlink(&path, &target).with_context(|| {
+                                        format!("Failed to symlink {} -> {}", target.display(), path.display())
+                                    })?;
+                                    planned += 1;
+                                    continue;
                                 }
                             }
                             println!(
@@ -307,32 +315,41 @@ fn process(root: &Path, opts: Options) -> Result<()> {
                 if target.exists() || target.is_symlink() {
                     // If --dry-run, compare file contents where possible and report if identical
                     let mut state = String::new();
-                    let mut identical = false;
-                    {
-                        // Resolve if target is a symlink; read target contents if it points to source
-                        let check = (|| -> Result<bool> {
-                            let meta = fs::symlink_metadata(&target).ok();
-                            if let Some(m) = meta {
-                                if m.file_type().is_symlink() {
-                                    if let Ok(link_target) = fs::read_link(&target) {
-                                        if link_target == path {
-                                            return Ok(true);
-                                        }
+                    let identical: bool = (|| -> bool {
+                        let meta = fs::symlink_metadata(&target).ok();
+                        if let Some(m) = meta {
+                            if m.file_type().is_symlink() {
+                                if let Ok(link_target) = fs::read_link(&target) {
+                                    if link_target == path {
+                                        return true;
                                     }
                                 }
                             }
-                            // If it's a regular file, compare bytes
-                            if target.is_file() && path.is_file() {
-                                if let (Ok(a), Ok(b)) = (fs::read(&target), fs::read(&path)) {
-                                    return Ok(a == b);
-                                }
+                        }
+                        if target.is_file() && path.is_file() {
+                            if let (Ok(a), Ok(b)) = (fs::read(&target), fs::read(&path)) {
+                                return a == b;
                             }
-                            Ok(false)
-                        })().unwrap_or(false);
+                        }
+                        false
+                    })();
+                    if opts.dry_run {
                         if identical {
                             state = opts.color.green("identical");
                         } else {
                             state = opts.color.yellow("differs");
+                        }
+                    }
+                    if opts.override_identical && identical && !opts.dry_run {
+                        if target.is_dir() {
+                            // don't remove directories implicitly
+                        } else {
+                            let _ = fs::remove_file(&target);
+                            unix_fs::symlink(&path, &target).with_context(|| {
+                                format!("Failed to symlink {} -> {}", target.display(), path.display())
+                            })?;
+                            planned += 1;
+                            continue;
                         }
                     }
                     println!(
