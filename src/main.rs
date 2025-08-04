@@ -6,6 +6,15 @@ use std::fs::read_dir;
 use std::os::unix::fs as unix_fs;
 use std::path::{Path, PathBuf};
 
+// Simple color helpers using ANSI escapes (runtime switchable)
+#[derive(Clone, Copy, Debug)]
+struct Colorize(bool);
+impl Colorize {
+    fn green(&self, s: &str) -> String { if self.0 { format!("\x1b[32m{}\x1b[0m", s) } else { s.to_string() } }
+    fn red(&self, s: &str) -> String { if self.0 { format!("\x1b[31m{}\x1b[0m", s) } else { s.to_string() } }
+    fn blue(&self, s: &str) -> String { if self.0 { format!("\x1b[34m{}\x1b[0m", s) } else { s.to_string() } }
+}
+
 #[derive(Parser, Debug)]
 #[command(author, version, about)]
 struct Args {
@@ -46,6 +55,7 @@ fn lua_should_include(lua: &Lua, lua_file: &Path) -> Result<bool> {
 #[derive(Clone, Copy, Debug)]
 struct Options {
     dry_run: bool,
+    color: Colorize,
 }
 
 fn process(root: &Path, opts: Options) -> Result<()> {
@@ -53,6 +63,9 @@ fn process(root: &Path, opts: Options) -> Result<()> {
     let lua = Lua::new();
 
     fn walk_dir(root: &Path, rel: &Path, home: &Path, lua: &Lua, opts: Options) -> Result<()> {
+        let mut planned: usize = 0;
+        let mut conflicts: usize = 0;
+        let mut skips: usize = 0;
         for entry in read_dir(root.join(rel)).with_context(|| format!("Failed to read dir {}", root.join(rel).display()))? {
             let entry = entry?;
             let path = entry.path();
@@ -86,6 +99,8 @@ fn process(root: &Path, opts: Options) -> Result<()> {
                     include = lua_should_include(lua, &companion)?;
                 }
                 if !include {
+                    if opts.dry_run { println!("{} {}", opts.color.blue("ℹ".into()), format!("Skipped by lua: {}", rel_path.display())); }
+                    skips += 1;
                     continue;
                 }
 
@@ -104,7 +119,8 @@ fn process(root: &Path, opts: Options) -> Result<()> {
                 // Report if target already exists
                 if target.exists() || target.is_symlink() {
                     if opts.dry_run {
-                        println!("Conflict: target exists {} (source: {})", target.display(), path.display());
+                        println!("{} {}", opts.color.red("✗"), format!("Conflict: target exists {} (source: {})", target.display(), path.display()));
+                        conflicts += 1;
                         continue;
                     } else {
                         bail!("Target already exists: {}", target.display());
@@ -112,13 +128,17 @@ fn process(root: &Path, opts: Options) -> Result<()> {
                 }
 
                 if opts.dry_run {
-                    println!("Would symlink {} -> {}", target.display(), path.display());
+                    println!("{} {}", opts.color.green("✔"), format!("Would symlink {} -> {}", target.display(), path.display()));
+                    planned += 1;
                 } else {
                     unix_fs::symlink(&path, &target).with_context(|| {
                         format!("Failed to symlink {} -> {}", target.display(), path.display())
                     })?;
                 }
             }
+        }
+        if opts.dry_run && rel.as_os_str().is_empty() {
+            println!("\nSummary: {} planned, {} conflicts, {} skipped by lua", opts.color.green(&planned.to_string()), opts.color.red(&conflicts.to_string()), opts.color.blue(&skips.to_string()));
         }
         Ok(())
     }
@@ -136,6 +156,9 @@ fn main() -> Result<()> {
         /// Dry run: only print operations, do not modify filesystem
         #[arg(long)]
         dry_run: bool,
+        /// Disable colored output
+        #[arg(long)]
+        no_color: bool,
     }
 
     let cli = Cli::parse();
@@ -143,6 +166,9 @@ fn main() -> Result<()> {
     if !root_path.is_dir() {
         bail!("Root directory is not a directory: {}", root_path.display());
     }
-    let opts = Options { dry_run: cli.dry_run };
+    // Auto-detect TTY to decide default colors, allow --no-color to override
+    let stdout_is_tty = atty::is(atty::Stream::Stdout);
+    let color = Colorize(stdout_is_tty && !cli.no_color);
+    let opts = Options { dry_run: cli.dry_run, color };
     process(&root_path, opts)
 }
