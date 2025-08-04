@@ -35,7 +35,13 @@ fn expand_tilde(p: &str) -> Result<PathBuf> {
     }
 }
 
-fn lua_should_include(lua: &Lua, lua_file: &Path) -> Result<bool> {
+#[derive(Debug)]
+struct LuaDecision {
+    include: bool,
+    rename_to: Option<String>,
+}
+
+fn lua_decision(lua: &Lua, lua_file: &Path) -> Result<LuaDecision> {
     let src = fs::read_to_string(lua_file)
         .with_context(|| format!("Failed to read Lua file: {}", lua_file.display()))?;
     let chunk = lua.load(&src).set_name(lua_file.to_string_lossy());
@@ -43,9 +49,23 @@ fn lua_should_include(lua: &Lua, lua_file: &Path) -> Result<bool> {
         .eval::<Value>()
         .map_err(|e| anyhow::anyhow!("Failed to execute Lua chunk: {}", e))?;
     match value {
-        Value::Boolean(b) => Ok(b),
+        Value::Boolean(b) => Ok(LuaDecision { include: b, rename_to: None }),
+        Value::Table(t) => {
+            // read optional rename_to
+            let rt: Option<String> = t.get("rename_to").map_err(|e| anyhow::anyhow!("Invalid rename_to: {}", e))?;
+            if let Some(name) = &rt {
+                // Validate: must not contain path separators
+                if name.contains('/') || name.contains('\\') {
+                    bail!("rename_to must be a file name without path separators: {}", name);
+                }
+                if name.is_empty() {
+                    bail!("rename_to must not be empty");
+                }
+            }
+            Ok(LuaDecision { include: true, rename_to: rt })
+        }
         other => bail!(
-            "Lua filter did not return boolean for {}. Got {}",
+            "Lua filter must return boolean or table for {}. Got {}",
             lua_file.display(),
             other.type_name()
         ),
@@ -96,7 +116,44 @@ fn process(root: &Path, opts: Options) -> Result<()> {
 
                 let mut include = true;
                 if companion.exists() {
-                    include = lua_should_include(lua, &companion)?;
+                    let decision = lua_decision(lua, &companion)?;
+                    if let Some(new_name) = decision.rename_to {
+                        // Warn if rename_to equals original filename
+                        if rel_path.file_name().and_then(|s| s.to_str()).map(|s| s == new_name).unwrap_or(false) && opts.dry_run {
+                            println!("{} {}", opts.color.blue("ℹ".into()), format!("rename_to is same as original for {}", rel_path.display()));
+                        }
+                        // adjust target relative path filename
+                        let new_rel = rel_path.with_file_name(new_name);
+                        let target = home.join(&new_rel);
+                        // Always create parent directories
+                        if let Some(parent) = target.parent() {
+                            if !opts.dry_run {
+                                fs::create_dir_all(parent).with_context(|| format!(
+                                    "Failed to create parent directories for {}",
+                                    target.display()
+                                ))?;
+                            }
+                        }
+                        if target.exists() || target.is_symlink() {
+                            if opts.dry_run {
+                                println!("{} {}", opts.color.red("✗"), format!("Conflict: target exists {} (source: {})", target.display(), path.display()));
+                                conflicts += 1;
+                            } else {
+                                bail!("Target already exists: {}", target.display());
+                            }
+                            continue;
+                        }
+                        if opts.dry_run {
+                            println!("{} {}", opts.color.green("✔"), format!("Would symlink {} -> {}", target.display(), path.display()));
+                            planned += 1;
+                        } else {
+                            unix_fs::symlink(&path, &target).with_context(|| {
+                                format!("Failed to symlink {} -> {}", target.display(), path.display())
+                            })?;
+                        }
+                        continue;
+                    }
+                    include = decision.include; // table implies include=true by default
                 }
                 if !include {
                     if opts.dry_run { println!("{} {}", opts.color.blue("ℹ".into()), format!("Skipped by lua: {}", rel_path.display())); }
