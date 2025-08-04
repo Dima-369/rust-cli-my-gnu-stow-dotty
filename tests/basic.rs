@@ -36,5 +36,5 @@ fn dry_run_reports_plans_conflicts_and_skips() {
         .stdout(predicate::str::contains("Would symlink"))
         .stdout(predicate::str::contains("Conflict: target exists"))
         .stdout(predicate::str::contains("Skipped by lua"))
-        .stdout(predicate::str::contains("Summary: 1 planned, 1 conflicts, 1 skipped by lua"));
+        .stdout(predicate::str::contains("Summary: 1 planned, 1 conflict, 1 skipped by lua"));
 }

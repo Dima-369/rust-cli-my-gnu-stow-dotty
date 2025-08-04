@@ -195,7 +195,15 @@ fn process(root: &Path, opts: Options) -> Result<()> {
             }
         }
         if opts.dry_run && rel.as_os_str().is_empty() {
-            println!("\nSummary: {} planned, {} conflicts, {} skipped by lua", opts.color.green(&planned.to_string()), opts.color.red(&conflicts.to_string()), opts.color.blue(&skips.to_string()));
+            let conflicts_label = if conflicts == 1 { "conflict" } else { "conflicts" };
+            let planned_label = if planned == 1 { "planned" } else { "planned" }; // same word reads fine
+            let skipped_label = if skips == 1 { "skipped by lua" } else { "skipped by lua" }; // keep phrase
+            println!(
+                "\nSummary: {} {}, {} {}, {} {}",
+                opts.color.green(&planned.to_string()), planned_label,
+                opts.color.red(&conflicts.to_string()), conflicts_label,
+                opts.color.blue(&skips.to_string()), skipped_label
+            );
         }
         Ok(())
     }
