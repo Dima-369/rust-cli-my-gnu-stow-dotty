@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::Parser;
 use mlua::{Lua, Value};
 use std::fs;
@@ -10,9 +10,27 @@ use std::path::{Path, PathBuf};
 #[derive(Clone, Copy, Debug)]
 struct Colorize(bool);
 impl Colorize {
-    fn green(&self, s: &str) -> String { if self.0 { format!("\x1b[32m{}\x1b[0m", s) } else { s.to_string() } }
-    fn red(&self, s: &str) -> String { if self.0 { format!("\x1b[31m{}\x1b[0m", s) } else { s.to_string() } }
-    fn blue(&self, s: &str) -> String { if self.0 { format!("\x1b[34m{}\x1b[0m", s) } else { s.to_string() } }
+    fn green(&self, s: &str) -> String {
+        if self.0 {
+            format!("\x1b[32m{s}\x1b[0m")
+        } else {
+            s.to_string()
+        }
+    }
+    fn red(&self, s: &str) -> String {
+        if self.0 {
+            format!("\x1b[31m{s}\x1b[0m")
+        } else {
+            s.to_string()
+        }
+    }
+    fn blue(&self, s: &str) -> String {
+        if self.0 {
+            format!("\x1b[34m{s}\x1b[0m")
+        } else {
+            s.to_string()
+        }
+    }
 }
 
 #[derive(Parser, Debug)]
@@ -49,20 +67,31 @@ fn lua_decision(lua: &Lua, lua_file: &Path) -> Result<LuaDecision> {
         .eval::<Value>()
         .map_err(|e| anyhow::anyhow!("Failed to execute Lua chunk: {}", e))?;
     match value {
-        Value::Boolean(b) => Ok(LuaDecision { include: b, rename_to: None }),
+        Value::Boolean(b) => Ok(LuaDecision {
+            include: b,
+            rename_to: None,
+        }),
         Value::Table(t) => {
             // read optional rename_to
-            let rt: Option<String> = t.get("rename_to").map_err(|e| anyhow::anyhow!("Invalid rename_to: {}", e))?;
+            let rt: Option<String> = t
+                .get("rename_to")
+                .map_err(|e| anyhow::anyhow!("Invalid rename_to: {}", e))?;
             if let Some(name) = &rt {
                 // Validate: must not contain path separators
                 if name.contains('/') || name.contains('\\') {
-                    bail!("rename_to must be a file name without path separators: {}", name);
+                    bail!(
+                        "rename_to must be a file name without path separators: {}",
+                        name
+                    );
                 }
                 if name.is_empty() {
                     bail!("rename_to must not be empty");
                 }
             }
-            Ok(LuaDecision { include: true, rename_to: rt })
+            Ok(LuaDecision {
+                include: true,
+                rename_to: rt,
+            })
         }
         other => bail!(
             "Lua filter must return boolean or table for {}. Got {}",
@@ -83,12 +112,24 @@ fn process(root: &Path, opts: Options) -> Result<()> {
     let lua = Lua::new();
 
     #[derive(Default)]
-    struct WalkCounts { planned: usize, conflicts: usize, skips: usize }
-    fn walk_dir(root: &Path, rel: &Path, home: &Path, lua: &Lua, opts: Options) -> Result<WalkCounts> {
+    struct WalkCounts {
+        planned: usize,
+        conflicts: usize,
+        skips: usize,
+    }
+    fn walk_dir(
+        root: &Path,
+        rel: &Path,
+        home: &Path,
+        lua: &Lua,
+        opts: Options,
+    ) -> Result<WalkCounts> {
         let mut planned: usize = 0;
         let mut conflicts: usize = 0;
         let mut skips: usize = 0;
-        for entry in read_dir(root.join(rel)).with_context(|| format!("Failed to read dir {}", root.join(rel).display()))? {
+        for entry in read_dir(root.join(rel))
+            .with_context(|| format!("Failed to read dir {}", root.join(rel).display()))?
+        {
             let entry = entry?;
             let path = entry.path();
             let rel_path = rel.join(entry.file_name());
@@ -124,8 +165,18 @@ fn process(root: &Path, opts: Options) -> Result<()> {
                     let decision = lua_decision(lua, &companion)?;
                     if let Some(new_name) = decision.rename_to {
                         // Warn if rename_to equals original filename
-                        if rel_path.file_name().and_then(|s| s.to_str()).map(|s| s == new_name).unwrap_or(false) && opts.dry_run {
-                            println!("{} {}", opts.color.blue("ℹ".into()), format!("rename_to is same as original for {}", rel_path.display()));
+                        if rel_path
+                            .file_name()
+                            .and_then(|s| s.to_str())
+                            .map(|s| s == new_name)
+                            .unwrap_or(false)
+                            && opts.dry_run
+                        {
+                            println!(
+                                "{} {}",
+                                opts.color.blue("ℹ"),
+                                format!("rename_to is same as original for {}", rel_path.display())
+                            );
                         }
                         // adjust target relative path filename
                         let new_rel = rel_path.with_file_name(new_name);
@@ -133,21 +184,39 @@ fn process(root: &Path, opts: Options) -> Result<()> {
                         // Always create parent directories
                         if let Some(parent) = target.parent() {
                             if !opts.dry_run {
-                                fs::create_dir_all(parent).with_context(|| format!(
-                                    "Failed to create parent directories for {}",
-                                    target.display()
-                                ))?;
+                                fs::create_dir_all(parent).with_context(|| {
+                                    format!(
+                                        "Failed to create parent directories for {}",
+                                        target.display()
+                                    )
+                                })?;
                             }
                         }
                         if target.exists() || target.is_symlink() {
-                            println!("{} {}", opts.color.red("✗"), format!("Conflict: target exists {} (source: {})", target.display(), path.display()));
+                            println!(
+                                "{} {}",
+                                opts.color.red("✗"),
+                                format!(
+                                    "Conflict: target exists {} (source: {})",
+                                    target.display(),
+                                    path.display()
+                                )
+                            );
                             conflicts += 1;
                             continue;
                         }
-                        println!("{} {}", opts.color.green("✔"), format!("Would symlink {} -> {}", target.display(), path.display()));
+                        println!(
+                            "{} {}",
+                            opts.color.green("✔"),
+                            format!("Would symlink {} -> {}", target.display(), path.display())
+                        );
                         if !opts.dry_run {
                             unix_fs::symlink(&path, &target).with_context(|| {
-                                format!("Failed to symlink {} -> {}", target.display(), path.display())
+                                format!(
+                                    "Failed to symlink {} -> {}",
+                                    target.display(),
+                                    path.display()
+                                )
                             })?;
                         }
                         planned += 1;
@@ -156,7 +225,13 @@ fn process(root: &Path, opts: Options) -> Result<()> {
                     include = decision.include; // table implies include=true by default
                 }
                 if !include {
-                    if opts.dry_run { println!("{} {}", opts.color.blue("ℹ".into()), format!("Skipped by lua: {}", rel_path.display())); }
+                    if opts.dry_run {
+                        println!(
+                            "{} {}",
+                            opts.color.blue("ℹ"),
+                            format!("Skipped by lua: {}", rel_path.display())
+                        );
+                    }
                     skips += 1;
                     continue;
                 }
@@ -166,49 +241,86 @@ fn process(root: &Path, opts: Options) -> Result<()> {
                 // Always create parent directories
                 if let Some(parent) = target.parent() {
                     if !opts.dry_run {
-                        fs::create_dir_all(parent).with_context(|| format!(
-                            "Failed to create parent directories for {}",
-                            target.display()
-                        ))?;
+                        fs::create_dir_all(parent).with_context(|| {
+                            format!(
+                                "Failed to create parent directories for {}",
+                                target.display()
+                            )
+                        })?;
                     }
                 }
 
                 // Report if target already exists
                 if target.exists() || target.is_symlink() {
-                    println!("{} {}", opts.color.red("✗"), format!("Conflict: target exists {} (source: {})", target.display(), path.display()));
+                    println!(
+                        "{} {}",
+                        opts.color.red("✗"),
+                        format!(
+                            "Conflict: target exists {} (source: {})",
+                            target.display(),
+                            path.display()
+                        )
+                    );
                     conflicts += 1;
                     continue;
                 }
 
-                println!("{} {}", opts.color.green("✔"), format!("Would symlink {} -> {}", target.display(), path.display()));
+                println!(
+                    "{} {}",
+                    opts.color.green("✔"),
+                    format!("Would symlink {} -> {}", target.display(), path.display())
+                );
                 if !opts.dry_run {
                     unix_fs::symlink(&path, &target).with_context(|| {
-                        format!("Failed to symlink {} -> {}", target.display(), path.display())
+                        format!(
+                            "Failed to symlink {} -> {}",
+                            target.display(),
+                            path.display()
+                        )
                     })?;
                 }
                 planned += 1;
             }
         }
-        Ok(WalkCounts { planned, conflicts, skips })
+        Ok(WalkCounts {
+            planned,
+            conflicts,
+            skips,
+        })
     }
 
     let totals = walk_dir(root, Path::new(""), &home, &lua, opts)?;
-    let conflicts_label = if totals.conflicts == 1 { "conflict" } else { "conflicts" };
-    let planned_label = if totals.planned == 1 { "planned" } else { "planned" };
-    let skipped_label = if totals.skips == 1 { "skipped by lua" } else { "skipped by lua" };
+    let conflicts_label = if totals.conflicts == 1 {
+        "conflict"
+    } else {
+        "conflicts"
+    };
+    let planned_label = if totals.planned == 1 {
+        "planned"
+    } else {
+        "planned"
+    };
+    let skipped_label = if totals.skips == 1 {
+        "skipped by lua"
+    } else {
+        "skipped by lua"
+    };
     println!(
         "\nSummary: {} {}, {} {}, {} {}",
-        opts.color.green(&totals.planned.to_string()), planned_label,
-        opts.color.red(&totals.conflicts.to_string()), conflicts_label,
-        opts.color.blue(&totals.skips.to_string()), skipped_label
+        opts.color.green(&totals.planned.to_string()),
+        planned_label,
+        opts.color.red(&totals.conflicts.to_string()),
+        conflicts_label,
+        opts.color.blue(&totals.skips.to_string()),
+        skipped_label
     );
     Ok(())
 }
 
 fn main() -> Result<()> {
     // This tool is intended for macOS only
-#[cfg(not(target_os = "macos"))]
-compile_error!("This tool only supports macOS (target_os=macos)");
+    #[cfg(not(target_os = "macos"))]
+    compile_error!("This tool only supports macOS (target_os=macos)");
     #[derive(Parser, Debug)]
     #[command(author, version, about)]
     struct Cli {
@@ -231,6 +343,9 @@ compile_error!("This tool only supports macOS (target_os=macos)");
     // Auto-detect TTY to decide default colors, allow --no-color to override
     let stdout_is_tty = atty::is(atty::Stream::Stdout);
     let color = Colorize(stdout_is_tty && !cli.no_color);
-    let opts = Options { dry_run: cli.dry_run, color };
+    let opts = Options {
+        dry_run: cli.dry_run,
+        color,
+    };
     process(&root_path, opts)
 }

@@ -22,7 +22,8 @@ fn nested_counts_aggregate_across_subdirs() {
     fs::write(home.join(".config/kitty/kitty.conf"), b"existing").unwrap();
 
     let mut cmd = assert_cmd::Command::cargo_bin("dotty").unwrap();
-    cmd.arg("--root").arg(root.to_string_lossy().to_string())
+    cmd.arg("--root")
+        .arg(root.to_string_lossy().to_string())
         .arg("--dry-run")
         .arg("--no-color");
     cmd.env("HOME", &home);
