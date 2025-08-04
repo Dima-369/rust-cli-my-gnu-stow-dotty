@@ -135,22 +135,17 @@ fn process(root: &Path, opts: Options) -> Result<()> {
                             }
                         }
                         if target.exists() || target.is_symlink() {
-                            if opts.dry_run {
-                                println!("{} {}", opts.color.red("✗"), format!("Conflict: target exists {} (source: {})", target.display(), path.display()));
-                                conflicts += 1;
-                            } else {
-                                bail!("Target already exists: {}", target.display());
-                            }
+                            println!("{} {}", opts.color.red("✗"), format!("Conflict: target exists {} (source: {})", target.display(), path.display()));
+                            conflicts += 1;
                             continue;
                         }
-                        if opts.dry_run {
-                            println!("{} {}", opts.color.green("✔"), format!("Would symlink {} -> {}", target.display(), path.display()));
-                            planned += 1;
-                        } else {
+                        println!("{} {}", opts.color.green("✔"), format!("Would symlink {} -> {}", target.display(), path.display()));
+                        if !opts.dry_run {
                             unix_fs::symlink(&path, &target).with_context(|| {
                                 format!("Failed to symlink {} -> {}", target.display(), path.display())
                             })?;
                         }
+                        planned += 1;
                         continue;
                     }
                     include = decision.include; // table implies include=true by default
@@ -175,26 +170,21 @@ fn process(root: &Path, opts: Options) -> Result<()> {
 
                 // Report if target already exists
                 if target.exists() || target.is_symlink() {
-                    if opts.dry_run {
-                        println!("{} {}", opts.color.red("✗"), format!("Conflict: target exists {} (source: {})", target.display(), path.display()));
-                        conflicts += 1;
-                        continue;
-                    } else {
-                        bail!("Target already exists: {}", target.display());
-                    }
+                    println!("{} {}", opts.color.red("✗"), format!("Conflict: target exists {} (source: {})", target.display(), path.display()));
+                    conflicts += 1;
+                    continue;
                 }
 
-                if opts.dry_run {
-                    println!("{} {}", opts.color.green("✔"), format!("Would symlink {} -> {}", target.display(), path.display()));
-                    planned += 1;
-                } else {
+                println!("{} {}", opts.color.green("✔"), format!("Would symlink {} -> {}", target.display(), path.display()));
+                if !opts.dry_run {
                     unix_fs::symlink(&path, &target).with_context(|| {
                         format!("Failed to symlink {} -> {}", target.display(), path.display())
                     })?;
                 }
+                planned += 1;
             }
         }
-        if opts.dry_run && rel.as_os_str().is_empty() {
+        if rel.as_os_str().is_empty() {
             let conflicts_label = if conflicts == 1 { "conflict" } else { "conflicts" };
             let planned_label = if planned == 1 { "planned" } else { "planned" }; // same word reads fine
             let skipped_label = if skips == 1 { "skipped by lua" } else { "skipped by lua" }; // keep phrase
