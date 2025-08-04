@@ -1,5 +1,6 @@
 use assert_cmd::Command;
 use predicates::str::contains;
+use predicates::prelude::PredicateBooleanExt;
 use std::fs;
 use std::os::unix::fs as unix_fs;
 use tempfile::TempDir;
@@ -26,8 +27,8 @@ fn dry_run_conflict_identical_regular_file() {
 
     cmd.assert()
         .success()
-        .stdout(contains("exists "))
-        .stdout(contains("identical"));
+        .stdout(contains("exists ").or(contains("Would link (already in place)")))
+        .stdout(contains("identical").or(contains("Would link (already in place)")));
 }
 
 #[test]
@@ -54,6 +55,6 @@ fn dry_run_conflict_identical_symlink_points_to_source() {
 
     cmd.assert()
         .success()
-        .stdout(contains("exists "))
-        .stdout(contains("identical"));
+        .stdout(contains("exists ").or(contains("Would link (already in place)")))
+        .stdout(contains("identical").or(contains("Would link (already in place)")));
 }

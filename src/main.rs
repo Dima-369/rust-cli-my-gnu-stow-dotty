@@ -118,6 +118,7 @@ fn lua_decision(lua: &Lua, lua_file: &Path) -> Result<LuaDecision> {
 struct Options {
     dry_run: bool,
     override_identical: bool,
+    verbose: bool,
     color: Colorize,
 }
 
@@ -130,6 +131,7 @@ fn process(root: &Path, opts: Options) -> Result<()> {
         planned: usize,
         conflicts: usize,
         skips: usize,
+        overrides: usize,
     }
     fn walk_dir(
         root: &Path,
@@ -141,6 +143,7 @@ fn process(root: &Path, opts: Options) -> Result<()> {
         let mut planned: usize = 0;
         let mut conflicts: usize = 0;
         let mut skips: usize = 0;
+        let mut overrides: usize = 0;
         for entry in read_dir(root.join(rel))
             .with_context(|| format!("Failed to read dir {}", root.join(rel).display()))?
         {
@@ -161,6 +164,7 @@ fn process(root: &Path, opts: Options) -> Result<()> {
                 planned += sub.planned;
                 conflicts += sub.conflicts;
                 skips += sub.skips;
+                overrides += sub.overrides;
                 continue;
             }
 
@@ -227,7 +231,7 @@ fn process(root: &Path, opts: Options) -> Result<()> {
                                 }
                                 false
                             })();
-                            if opts.dry_run {
+                            if opts.dry_run || opts.verbose {
                                 if identical {
                                     state = opts.color.green("identical");
                                 } else {
@@ -238,19 +242,59 @@ fn process(root: &Path, opts: Options) -> Result<()> {
                                 if target.is_dir() {
                                     // don't remove directories implicitly
                                 } else {
+                                    println!(
+                                        "{} {}",
+                                        opts.color.green("↻"),
+                                        format!(
+                                            "override identical: {} <- {}",
+                                            shorten_home(&target),
+                                            shorten_home(&path)
+                                        )
+                                    );
                                     let _ = fs::remove_file(&target);
                                     unix_fs::symlink(&path, &target).with_context(|| {
                                         format!("Failed to symlink {} -> {}", target.display(), path.display())
                                     })?;
                                     planned += 1;
+                                    overrides += 1;
+                                    println!(
+                                        "{} {}",
+                                        opts.color.green("✔"),
+                                        format!(
+                                            "Linked {} -> {}",
+                                            shorten_home(&target),
+                                            shorten_home(&path)
+                                        )
+                                    );
                                     continue;
                                 }
+                            }
+                            // If already linked, count as planned and show in dry-run/verbose; otherwise report conflict
+                            let already_symlinked = fs::symlink_metadata(&target)
+                                .ok()
+                                .map(|m| m.file_type().is_symlink())
+                                .unwrap_or(false)
+                                && fs::read_link(&target).ok().as_deref() == Some(path.as_path());
+                            if already_symlinked {
+                                planned += 1;
+                                if opts.dry_run || opts.verbose {
+                                    println!(
+                                        "{} {}",
+                                        opts.color.green("✔"),
+                                        format!(
+                                            "Would link (already in place) {} -> {}",
+                                            shorten_home(&target),
+                                            shorten_home(&path)
+                                        )
+                                    );
+                                }
+                                continue;
                             }
                             println!(
                                 "{} {}",
                                 &format!("{} {}", opts.color.red("✗"), opts.color.red("exists")),
                                 {
-                                    let state_str = if state.is_empty() { String::new() } else { format!(" ({})", state) };
+                                    let state_str = if (opts.dry_run || opts.verbose) && !state.is_empty() { format!(" ({})", state) } else { String::new() };
                                     format!(
                                         "{} <- {}{}",
                                         shorten_home(&target),
@@ -262,16 +306,17 @@ fn process(root: &Path, opts: Options) -> Result<()> {
                             conflicts += 1;
                             continue;
                         }
-                        println!(
-                            "{} {}",
-                            opts.color.green("✔"),
-                            format!(
-                                "Would symlink {} -> {}",
-                                shorten_home(&target),
-                                shorten_home(&path)
-                            )
-                        );
-                        if !opts.dry_run {
+                        if opts.dry_run {
+                            println!(
+                                "{} {}",
+                                opts.color.green("✔"),
+                                format!(
+                                    "Would symlink {} -> {}",
+                                    shorten_home(&target),
+                                    shorten_home(&path)
+                                )
+                            );
+                        } else {
                             unix_fs::symlink(&path, &target).with_context(|| {
                                 format!(
                                     "Failed to symlink {} -> {}",
@@ -279,6 +324,15 @@ fn process(root: &Path, opts: Options) -> Result<()> {
                                     path.display()
                                 )
                             })?;
+                            println!(
+                                "{} {}",
+                                opts.color.green("✔"),
+                                format!(
+                                    "Linked {} -> {}",
+                                    shorten_home(&target),
+                                    shorten_home(&path)
+                                )
+                            );
                         }
                         planned += 1;
                         continue;
@@ -333,30 +387,72 @@ fn process(root: &Path, opts: Options) -> Result<()> {
                         }
                         false
                     })();
-                    if opts.dry_run {
+                    if opts.dry_run || opts.verbose {
                         if identical {
                             state = opts.color.green("identical");
                         } else {
                             state = opts.color.yellow("differs");
                         }
                     }
+                    // If the existing target is already a symlink to the source, count it as linked and do not print a conflict
+                    let already_symlinked = fs::symlink_metadata(&target)
+                        .ok()
+                        .map(|m| m.file_type().is_symlink())
+                        .unwrap_or(false)
+                        && fs::read_link(&target).ok().as_deref() == Some(path.as_path());
+                    if already_symlinked {
+                        planned += 1; // count as linked
+                        if opts.dry_run || opts.verbose {
+                            println!(
+                                "{} {}",
+                                opts.color.green("✔"),
+                                format!(
+                                    "Would link (already in place) {} -> {}",
+                                    shorten_home(&target),
+                                    shorten_home(&path)
+                                )
+                            );
+                        }
+                        continue;
+                    }
                     if opts.override_identical && identical && !opts.dry_run {
                         if target.is_dir() {
                             // don't remove directories implicitly
                         } else {
+                            // If not already symlinked, perform override
+                            println!(
+                                "{} {}",
+                                opts.color.green("↻"),
+                                format!(
+                                    "override identical: {} <- {}",
+                                    shorten_home(&target),
+                                    shorten_home(&path)
+                                )
+                            );
                             let _ = fs::remove_file(&target);
                             unix_fs::symlink(&path, &target).with_context(|| {
                                 format!("Failed to symlink {} -> {}", target.display(), path.display())
                             })?;
                             planned += 1;
+                            overrides += 1;
+                            println!(
+                                "{} {}",
+                                opts.color.green("✔"),
+                                format!(
+                                    "Linked {} -> {}",
+                                    shorten_home(&target),
+                                    shorten_home(&path)
+                                )
+                            );
                             continue;
                         }
                     }
+                    // Otherwise, it's a real conflict
                     println!(
                         "{} {}",
                         &format!("{} {}", opts.color.red("✗"), opts.color.red("exists")),
                         {
-                        let state_str = if state.is_empty() { String::new() } else { format!(" ({})", state) };
+                        let state_str = if (opts.dry_run || opts.verbose) && !state.is_empty() { format!(" ({})", state) } else { String::new() };
                         format!(
                             "{} <- {}{}",
                             shorten_home(&target),
@@ -369,16 +465,17 @@ fn process(root: &Path, opts: Options) -> Result<()> {
                     continue;
                 }
 
-                println!(
-                    "{} {}",
-                    opts.color.green("✔"),
-                    format!(
-                        "Would symlink {} -> {}",
-                        shorten_home(&target),
-                        shorten_home(&path)
-                    )
-                );
-                if !opts.dry_run {
+                if opts.dry_run {
+                    println!(
+                        "{} {}",
+                        opts.color.green("✔"),
+                        format!(
+                            "Would symlink {} -> {}",
+                            shorten_home(&target),
+                            shorten_home(&path)
+                        )
+                    );
+                } else {
                     unix_fs::symlink(&path, &target).with_context(|| {
                         format!(
                             "Failed to symlink {} -> {}",
@@ -386,6 +483,15 @@ fn process(root: &Path, opts: Options) -> Result<()> {
                             path.display()
                         )
                     })?;
+                    println!(
+                        "{} {}",
+                        opts.color.green("✔"),
+                        format!(
+                            "Linked {} -> {}",
+                            shorten_home(&target),
+                            shorten_home(&path)
+                        )
+                    );
                 }
                 planned += 1;
             }
@@ -394,6 +500,7 @@ fn process(root: &Path, opts: Options) -> Result<()> {
             planned,
             conflicts,
             skips,
+            overrides,
         })
     }
 
@@ -403,24 +510,21 @@ fn process(root: &Path, opts: Options) -> Result<()> {
     } else {
         "conflicts"
     };
-    let planned_label = if totals.planned == 1 {
-        "planned"
-    } else {
-        "planned"
-    };
+    let planned_label = if opts.dry_run { "planned" } else { "linked" };
     let skipped_label = if totals.skips == 1 {
         "skipped by lua"
     } else {
         "skipped by lua"
     };
     println!(
-        "\nSummary: {} {}, {} {}, {} {}",
+        "\nSummary: {} {}, {} {}, {} {}, {} overrides",
         opts.color.green(&totals.planned.to_string()),
         planned_label,
         opts.color.red(&totals.conflicts.to_string()),
         conflicts_label,
         opts.color.blue(&totals.skips.to_string()),
-        skipped_label
+        skipped_label,
+        opts.color.green(&totals.overrides.to_string()),
     );
     Ok(())
 }
@@ -441,6 +545,9 @@ fn main() -> Result<()> {
         /// If set, when a conflict target has identical content, delete it and create the symlink
         #[arg(long)]
         override_identical: bool,
+        /// Verbose output
+        #[arg(long)]
+        verbose: bool,
         /// Disable colored output
         #[arg(long)]
         no_color: bool,
@@ -457,6 +564,7 @@ fn main() -> Result<()> {
     let opts = Options {
         dry_run: cli.dry_run,
         override_identical: cli.override_identical,
+        verbose: cli.verbose,
         color,
     };
     process(&root_path, opts)
