@@ -6,6 +6,16 @@ use std::fs::read_dir;
 use std::os::unix::fs as unix_fs;
 use std::path::{Path, PathBuf};
 
+fn shorten_home(p: &Path) -> String {
+    let p_str = p.to_string_lossy();
+    if let Ok(home) = std::env::var("HOME") {
+        if p_str.starts_with(&home) {
+            return format!("~{}", &p_str[home.len()..]);
+        }
+    }
+    p_str.to_string()
+}
+
 // Simple color helpers using ANSI escapes (runtime switchable)
 #[derive(Clone, Copy, Debug)]
 struct Colorize(bool);
@@ -30,6 +40,12 @@ impl Colorize {
         } else {
             s.to_string()
         }
+    }
+    fn yellow(&self, s: &str) -> String {
+        if self.0 { format!("\x1b[33m{s}\x1b[0m") } else { s.to_string() }
+    }
+    fn magenta(&self, s: &str) -> String {
+        if self.0 { format!("\x1b[35m{s}\x1b[0m") } else { s.to_string() }
     }
 }
 
@@ -104,6 +120,7 @@ fn lua_decision(lua: &Lua, lua_file: &Path) -> Result<LuaDecision> {
 #[derive(Clone, Copy, Debug)]
 struct Options {
     dry_run: bool,
+    override_identical: bool,
     color: Colorize,
 }
 
@@ -175,7 +192,7 @@ fn process(root: &Path, opts: Options) -> Result<()> {
                             println!(
                                 "{} {}",
                                 opts.color.blue("ℹ"),
-                                format!("rename_to is same as original for {}", rel_path.display())
+                                format!("rename_to is same as original: {}", shorten_home(&home.join(&rel_path)))
                             );
                         }
                         // adjust target relative path filename
@@ -193,14 +210,46 @@ fn process(root: &Path, opts: Options) -> Result<()> {
                             }
                         }
                         if target.exists() || target.is_symlink() {
+                            // If --dry-run, compare file contents where possible and report if identical
+                            let mut state = String::new();
+                            let mut identical = false;
+                            {
+                                let check = (|| -> Result<bool> {
+                                    let meta = fs::symlink_metadata(&target).ok();
+                                    if let Some(m) = meta {
+                                        if m.file_type().is_symlink() {
+                                            if let Ok(link_target) = fs::read_link(&target) {
+                                                if link_target == path {
+                                                    return Ok(true);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if target.is_file() && path.is_file() {
+                                        if let (Ok(a), Ok(b)) = (fs::read(&target), fs::read(&path)) {
+                                            return Ok(a == b);
+                                        }
+                                    }
+                                    Ok(false)
+                                })().unwrap_or(false);
+                                if identical {
+                                    state = opts.color.green("identical");
+                                } else {
+                                    state = opts.color.yellow("differs");
+                                }
+                            }
                             println!(
                                 "{} {}",
-                                opts.color.red("✗"),
-                                format!(
-                                    "Conflict: target exists {} (source: {})",
-                                    target.display(),
-                                    path.display()
-                                )
+                                &format!("{} {}", opts.color.red("✗"), opts.color.red("exists")),
+                                {
+                                    let state_str = if state.is_empty() { String::new() } else { format!(" ({})", state) };
+                                    format!(
+                                        "{} <- {}{}",
+                                        shorten_home(&target),
+                                        shorten_home(&path),
+                                        state_str
+                                    )
+                                }
                             );
                             conflicts += 1;
                             continue;
@@ -208,7 +257,11 @@ fn process(root: &Path, opts: Options) -> Result<()> {
                         println!(
                             "{} {}",
                             opts.color.green("✔"),
-                            format!("Would symlink {} -> {}", target.display(), path.display())
+                            format!(
+                                "Would symlink {} -> {}",
+                                shorten_home(&target),
+                                shorten_home(&path)
+                            )
                         );
                         if !opts.dry_run {
                             unix_fs::symlink(&path, &target).with_context(|| {
@@ -229,7 +282,7 @@ fn process(root: &Path, opts: Options) -> Result<()> {
                         println!(
                             "{} {}",
                             opts.color.blue("ℹ"),
-                            format!("Skipped by lua: {}", rel_path.display())
+                            format!("Skipped by lua: {}", shorten_home(&home.join(&rel_path)))
                         );
                     }
                     skips += 1;
@@ -252,14 +305,48 @@ fn process(root: &Path, opts: Options) -> Result<()> {
 
                 // Report if target already exists
                 if target.exists() || target.is_symlink() {
+                    // If --dry-run, compare file contents where possible and report if identical
+                    let mut state = String::new();
+                    let mut identical = false;
+                    {
+                        // Resolve if target is a symlink; read target contents if it points to source
+                        let check = (|| -> Result<bool> {
+                            let meta = fs::symlink_metadata(&target).ok();
+                            if let Some(m) = meta {
+                                if m.file_type().is_symlink() {
+                                    if let Ok(link_target) = fs::read_link(&target) {
+                                        if link_target == path {
+                                            return Ok(true);
+                                        }
+                                    }
+                                }
+                            }
+                            // If it's a regular file, compare bytes
+                            if target.is_file() && path.is_file() {
+                                if let (Ok(a), Ok(b)) = (fs::read(&target), fs::read(&path)) {
+                                    return Ok(a == b);
+                                }
+                            }
+                            Ok(false)
+                        })().unwrap_or(false);
+                        if identical {
+                            state = opts.color.green("identical");
+                        } else {
+                            state = opts.color.yellow("differs");
+                        }
+                    }
                     println!(
                         "{} {}",
-                        opts.color.red("✗"),
+                        &format!("{} {}", opts.color.red("✗"), opts.color.red("exists")),
+                        {
+                        let state_str = if state.is_empty() { String::new() } else { format!(" ({})", state) };
                         format!(
-                            "Conflict: target exists {} (source: {})",
-                            target.display(),
-                            path.display()
+                            "{} <- {}{}",
+                            shorten_home(&target),
+                            shorten_home(&path),
+                            state_str
                         )
+                    }
                     );
                     conflicts += 1;
                     continue;
@@ -268,7 +355,11 @@ fn process(root: &Path, opts: Options) -> Result<()> {
                 println!(
                     "{} {}",
                     opts.color.green("✔"),
-                    format!("Would symlink {} -> {}", target.display(), path.display())
+                    format!(
+                        "Would symlink {} -> {}",
+                        shorten_home(&target),
+                        shorten_home(&path)
+                    )
                 );
                 if !opts.dry_run {
                     unix_fs::symlink(&path, &target).with_context(|| {
@@ -330,6 +421,9 @@ fn main() -> Result<()> {
         /// Dry run: only print operations, do not modify filesystem
         #[arg(long)]
         dry_run: bool,
+        /// If set, when a conflict target has identical content, delete it and create the symlink
+        #[arg(long)]
+        override_identical: bool,
         /// Disable colored output
         #[arg(long)]
         no_color: bool,
@@ -345,6 +439,7 @@ fn main() -> Result<()> {
     let color = Colorize(stdout_is_tty && !cli.no_color);
     let opts = Options {
         dry_run: cli.dry_run,
+        override_identical: cli.override_identical,
         color,
     };
     process(&root_path, opts)

@@ -1,4 +1,4 @@
-use assert_cmd::prelude::*;
+use assert_cmd::Command;
 use predicates::prelude::*;
 use std::fs;
 use tempfile::TempDir;
@@ -21,7 +21,7 @@ fn dry_run_reports_plans_conflicts_and_skips() {
     fs::write(home.join("c.txt"), b"existing").unwrap();
 
     // Build command
-    let mut cmd = assert_cmd::Command::cargo_bin("dotty").unwrap();
+    let mut cmd = Command::cargo_bin("dotty").unwrap();
     cmd.arg("--root")
         .arg(root.to_string_lossy().to_string())
         .arg("--dry-run")
@@ -33,7 +33,7 @@ fn dry_run_reports_plans_conflicts_and_skips() {
     cmd.assert()
         .success()
         .stdout(predicate::str::contains("Would symlink"))
-        .stdout(predicate::str::contains("Conflict: target exists"))
+        .stdout(predicate::str::contains("exists "))
         .stdout(predicate::str::contains("Skipped by lua"))
         .stdout(predicate::str::contains(
             "Summary: 1 planned, 1 conflict, 1 skipped by lua",

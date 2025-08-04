@@ -1,4 +1,4 @@
-use assert_cmd::prelude::*;
+use assert_cmd::Command;
 use predicates::prelude::*;
 use std::fs;
 use tempfile::TempDir;
@@ -19,7 +19,7 @@ fn dry_run_rename_to_plans_symlink_with_new_name() {
     )
     .unwrap();
 
-    let mut cmd = assert_cmd::Command::cargo_bin("dotty").unwrap();
+    let mut cmd = Command::cargo_bin("dotty").unwrap();
     cmd.arg("--root")
         .arg(root.to_string_lossy().to_string())
         .arg("--dry-run")

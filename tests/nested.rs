@@ -1,4 +1,4 @@
-use assert_cmd::prelude::*;
+use assert_cmd::Command;
 use predicates::str::contains;
 use std::fs;
 use tempfile::TempDir;
@@ -21,7 +21,7 @@ fn nested_counts_aggregate_across_subdirs() {
     fs::create_dir_all(home.join(".config/kitty")).unwrap();
     fs::write(home.join(".config/kitty/kitty.conf"), b"existing").unwrap();
 
-    let mut cmd = assert_cmd::Command::cargo_bin("dotty").unwrap();
+    let mut cmd = Command::cargo_bin("dotty").unwrap();
     cmd.arg("--root")
         .arg(root.to_string_lossy().to_string())
         .arg("--dry-run")
@@ -32,7 +32,7 @@ fn nested_counts_aggregate_across_subdirs() {
         .success()
         // Ensure all categories appear
         .stdout(contains("Would symlink"))
-        .stdout(contains("Conflict: target exists"))
+        .stdout(contains("exists "))
         .stdout(contains("Skipped by lua"))
         // Summary must count across subdirs: 1 planned, 1 conflict, 1 skipped by lua
         .stdout(contains("Summary: 1 planned, 1 conflict, 1 skipped by lua"));
