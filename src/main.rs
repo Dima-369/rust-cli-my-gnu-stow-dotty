@@ -101,9 +101,14 @@ fn process(root: &Path, opts: Options) -> Result<()> {
                     }
                 }
 
-                // Abort if target already exists
+                // Report if target already exists
                 if target.exists() || target.is_symlink() {
-                    bail!("Target already exists: {}", target.display());
+                    if opts.dry_run {
+                        println!("Conflict: target exists {} (source: {})", target.display(), path.display());
+                        continue;
+                    } else {
+                        bail!("Target already exists: {}", target.display());
+                    }
                 }
 
                 if opts.dry_run {
