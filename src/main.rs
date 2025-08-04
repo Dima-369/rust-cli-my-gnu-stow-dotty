@@ -147,6 +147,11 @@ fn process(root: &Path, opts: Options) -> Result<()> {
 }
 
 fn main() -> Result<()> {
+    // This tool is intended for macOS only
+    #[cfg(not(target_os = "macos"))]
+    {
+        anyhow::bail!("This tool only supports macOS (target_os=macos)");
+    }
     #[derive(Parser, Debug)]
     #[command(author, version, about)]
     struct Cli {
