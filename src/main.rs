@@ -154,8 +154,14 @@ fn process(root: &Path, opts: Options) -> Result<()> {
             let file_name_str = file_name.to_string_lossy();
 
             if file_name_str.ends_with(".lua") {
-                // skip companion files
-                continue;
+                // Check if this is a companion file by seeing if there's a corresponding non-.lua file
+                let base_name = &file_name_str[..file_name_str.len() - 4]; // Remove ".lua"
+                let corresponding_file = root.join(rel).join(base_name);
+                if corresponding_file.exists() {
+                    // This is a companion file, skip it
+                    continue;
+                }
+                // This is a standalone .lua file, process it normally
             }
 
             if path.is_dir() {
