@@ -42,7 +42,11 @@ impl Colorize {
         }
     }
     fn yellow(&self, s: &str) -> String {
-        if self.0 { format!("\x1b[33m{s}\x1b[0m") } else { s.to_string() }
+        if self.0 {
+            format!("\x1b[33m{s}\x1b[0m")
+        } else {
+            s.to_string()
+        }
     }
 }
 
@@ -153,9 +157,9 @@ fn process(root: &Path, opts: Options) -> Result<()> {
             let file_name = entry.file_name();
             let file_name_str = file_name.to_string_lossy();
 
-            if file_name_str.ends_with(".lua") {
+            if let Some(base_name) = file_name_str.strip_suffix(".lua") {
                 // Check if this is a companion file by seeing if there's a corresponding non-.lua file
-                let base_name = &file_name_str[..file_name_str.len() - 4]; // Remove ".lua"
+                // Remove ".lua"
                 let corresponding_file = root.join(rel).join(base_name);
                 if corresponding_file.exists() {
                     // This is a companion file, skip it
@@ -199,7 +203,10 @@ fn process(root: &Path, opts: Options) -> Result<()> {
                             println!(
                                 "{} {}",
                                 opts.color.blue("ℹ"),
-                                format!("rename_to is same as original: {}", shorten_home(&home.join(&rel_path)))
+                                format!(
+                                    "rename_to is same as original: {}",
+                                    shorten_home(&home.join(&rel_path))
+                                )
                             );
                         }
                         // adjust target relative path filename
@@ -259,7 +266,11 @@ fn process(root: &Path, opts: Options) -> Result<()> {
                                     );
                                     let _ = fs::remove_file(&target);
                                     unix_fs::symlink(&path, &target).with_context(|| {
-                                        format!("Failed to symlink {} -> {}", target.display(), path.display())
+                                        format!(
+                                            "Failed to symlink {} -> {}",
+                                            target.display(),
+                                            path.display()
+                                        )
                                     })?;
                                     planned += 1;
                                     overrides += 1;
@@ -300,7 +311,12 @@ fn process(root: &Path, opts: Options) -> Result<()> {
                                 "{} {}",
                                 &format!("{} {}", opts.color.red("✗"), opts.color.red("exists")),
                                 {
-                                    let state_str = if (opts.dry_run || opts.verbose) && !state.is_empty() { format!(" ({})", state) } else { String::new() };
+                                    let state_str =
+                                        if (opts.dry_run || opts.verbose) && !state.is_empty() {
+                                            format!(" ({state})")
+                                        } else {
+                                            String::new()
+                                        };
                                     format!(
                                         "{} <- {}{}",
                                         shorten_home(&target),
@@ -437,7 +453,11 @@ fn process(root: &Path, opts: Options) -> Result<()> {
                             );
                             let _ = fs::remove_file(&target);
                             unix_fs::symlink(&path, &target).with_context(|| {
-                                format!("Failed to symlink {} -> {}", target.display(), path.display())
+                                format!(
+                                    "Failed to symlink {} -> {}",
+                                    target.display(),
+                                    path.display()
+                                )
                             })?;
                             planned += 1;
                             overrides += 1;
@@ -458,14 +478,18 @@ fn process(root: &Path, opts: Options) -> Result<()> {
                         "{} {}",
                         &format!("{} {}", opts.color.red("✗"), opts.color.red("exists")),
                         {
-                        let state_str = if (opts.dry_run || opts.verbose) && !state.is_empty() { format!(" ({})", state) } else { String::new() };
-                        format!(
-                            "{} <- {}{}",
-                            shorten_home(&target),
-                            shorten_home(&path),
-                            state_str
-                        )
-                    }
+                            let state_str = if (opts.dry_run || opts.verbose) && !state.is_empty() {
+                                format!(" ({state})")
+                            } else {
+                                String::new()
+                            };
+                            format!(
+                                "{} <- {}{}",
+                                shorten_home(&target),
+                                shorten_home(&path),
+                                state_str
+                            )
+                        }
                     );
                     conflicts += 1;
                     continue;

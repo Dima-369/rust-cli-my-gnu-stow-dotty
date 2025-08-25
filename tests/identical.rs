@@ -1,6 +1,6 @@
 use assert_cmd::Command;
-use predicates::str::contains;
 use predicates::prelude::PredicateBooleanExt;
+use predicates::str::contains;
 use std::fs;
 use std::os::unix::fs as unix_fs;
 use tempfile::TempDir;
