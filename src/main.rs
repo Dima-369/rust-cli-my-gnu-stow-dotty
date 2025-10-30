@@ -1,6 +1,6 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{anyhow, bail, Context, Result};
 use clap::Parser;
-use mlua::{Lua, Value};
+use mlua::{Function, Lua, Value};
 use std::fs;
 use std::fs::read_dir;
 use std::os::unix::fs as unix_fs;
@@ -74,9 +74,10 @@ fn expand_tilde(p: &str) -> Result<PathBuf> {
 struct LuaDecision {
     include: bool,
     rename_to: Option<String>,
+    transform: Option<String>,
 }
 
-fn lua_decision(lua: &Lua, lua_file: &Path) -> Result<LuaDecision> {
+fn lua_decision(lua: &Lua, lua_file: &Path, source_file: &Path) -> Result<LuaDecision> {
     let src = fs::read_to_string(lua_file)
         .with_context(|| format!("Failed to read Lua file: {}", lua_file.display()))?;
     let chunk = lua.load(&src).set_name(lua_file.to_string_lossy());
@@ -87,12 +88,14 @@ fn lua_decision(lua: &Lua, lua_file: &Path) -> Result<LuaDecision> {
         Value::Boolean(b) => Ok(LuaDecision {
             include: b,
             rename_to: None,
+            transform: None,
         }),
         Value::Table(t) => {
             // read optional rename_to
-            let rt: Option<String> = t
-                .get("rename_to")
-                .map_err(|e| anyhow::anyhow!("Invalid rename_to: {}", e))?;
+            let rt: Option<String> = match t.get("rename_to") {
+                Ok(v) => v,
+                Err(_) => None,
+            };
             if let Some(name) = &rt {
                 // Validate: must not contain path separators
                 if name.contains('/') || name.contains('\\') {
@@ -105,9 +108,31 @@ fn lua_decision(lua: &Lua, lua_file: &Path) -> Result<LuaDecision> {
                     bail!("rename_to must not be empty");
                 }
             }
+
+            // New: read optional transform function
+            let transform_fn: Option<Function> = match t.get("transform") {
+                Ok(v) => v,
+                Err(_) => None,
+            };
+            let transformed_content = if let Some(func) = transform_fn {
+                let original_content = fs::read_to_string(source_file).with_context(|| {
+                    format!(
+                        "Failed to read source file for transform: {}",
+                        source_file.display()
+                    )
+                })?;
+                let result: String = func
+                    .call(original_content)
+                    .map_err(|e| anyhow!("Lua transform function error: {}", e))?;
+                Some(result)
+            } else {
+                None
+            };
+
             Ok(LuaDecision {
                 include: true,
                 rename_to: rt,
+                transform: transformed_content,
             })
         }
         other => bail!(
@@ -178,9 +203,9 @@ fn process(root: &Path, opts: Options) -> Result<()> {
                 continue;
             }
 
-            // Only symlink actual files
+            // Only symlink or transform actual files
             if path.is_file() {
-                // Build companion path by appending .lua to the filename
+                // 1. Determine Lua decision
                 let companion = path.with_extension(format!(
                     "{}lua",
                     path.extension()
@@ -188,146 +213,197 @@ fn process(root: &Path, opts: Options) -> Result<()> {
                         .unwrap_or_else(|| "".to_string())
                 ));
 
-                let mut include = true;
-                if companion.exists() {
-                    let decision = lua_decision(lua, &companion)?;
-                    if let Some(new_name) = decision.rename_to {
-                        // Warn if rename_to equals original filename
-                        if rel_path
-                            .file_name()
-                            .and_then(|s| s.to_str())
-                            .map(|s| s == new_name)
-                            .unwrap_or(false)
-                            && opts.dry_run
-                        {
+                let decision = if companion.exists() {
+                    lua_decision(lua, &companion, &path)?
+                } else {
+                    LuaDecision {
+                        include: true,
+                        rename_to: None,
+                        transform: None,
+                    }
+                };
+
+                // 2. Handle skip
+                if !decision.include {
+                    if opts.dry_run {
+                        println!(
+                            "{} {}",
+                            opts.color.blue("ℹ"),
+                            format!("Skipped by lua: {}", shorten_home(&home.join(&rel_path)))
+                        );
+                    }
+                    skips += 1;
+                    continue;
+                }
+
+                // 3. Determine target path
+                let target_rel_path = if let Some(new_name) = &decision.rename_to {
+                    rel_path.with_file_name(new_name)
+                } else {
+                    rel_path.to_path_buf()
+                };
+                let target = home.join(&target_rel_path);
+
+                // 4. Create parent dirs if not dry-run
+                if !opts.dry_run {
+                    if let Some(parent) = target.parent() {
+                        fs::create_dir_all(parent).with_context(|| {
+                            format!(
+                                "Failed to create parent directories for {}",
+                                target.display()
+                            )
+                        })?;
+                    }
+                }
+
+                // 5. Check for conflicts and process
+                if target.exists() || target.is_symlink() {
+                    // --- CONFLICT PATH ---
+                    let (identical, is_already_linked) = if let Some(content) = &decision.transform
+                    {
+                        // Transformed file identity check
+                        let is_identical = fs::read(&target)
+                            .ok()
+                            .map_or(false, |e| e == content.as_bytes());
+                        (is_identical, false)
+                    } else {
+                        // Symlink identity check
+                        let is_symlink = fs::symlink_metadata(&target)
+                            .ok()
+                            .map_or(false, |m| m.file_type().is_symlink());
+                        let link_target_matches =
+                            is_symlink && fs::read_link(&target).ok() == Some(path.to_path_buf());
+                        let content_matches = target.is_file()
+                            && path.is_file()
+                            && fs::read(&target).ok() == fs::read(&path).ok();
+                        (link_target_matches || content_matches, link_target_matches)
+                    };
+
+                    if is_already_linked || (decision.transform.is_some() && identical) {
+                        planned += 1;
+                        if opts.dry_run || opts.verbose {
+                            let action_desc = if decision.transform.is_some() {
+                                "write"
+                            } else {
+                                "link"
+                            };
                             println!(
                                 "{} {}",
-                                opts.color.blue("ℹ"),
+                                opts.color.green("✔"),
                                 format!(
-                                    "rename_to is same as original: {}",
-                                    shorten_home(&home.join(&rel_path))
+                                    "Would {} (already in place) {} -> {}",
+                                    action_desc,
+                                    shorten_home(&target),
+                                    shorten_home(&path)
                                 )
                             );
                         }
-                        // adjust target relative path filename
-                        let new_rel = rel_path.with_file_name(new_name);
-                        let target = home.join(&new_rel);
-                        // Always create parent directories
-                        if let Some(parent) = target.parent() {
-                            if !opts.dry_run {
-                                fs::create_dir_all(parent).with_context(|| {
-                                    format!(
-                                        "Failed to create parent directories for {}",
-                                        target.display()
-                                    )
-                                })?;
-                            }
-                        }
-                        if target.exists() || target.is_symlink() {
-                            // If --dry-run, compare file contents where possible and report if identical
-                            let mut state = String::new();
-                            let identical: bool = (|| -> bool {
-                                let meta = fs::symlink_metadata(&target).ok();
-                                if let Some(m) = meta {
-                                    if m.file_type().is_symlink() {
-                                        if let Ok(link_target) = fs::read_link(&target) {
-                                            if link_target == path {
-                                                return true;
-                                            }
-                                        }
-                                    }
-                                }
-                                if target.is_file() && path.is_file() {
-                                    if let (Ok(a), Ok(b)) = (fs::read(&target), fs::read(&path)) {
-                                        return a == b;
-                                    }
-                                }
-                                false
-                            })();
-                            if opts.dry_run || opts.verbose {
-                                if identical {
-                                    state = opts.color.green("identical");
-                                } else {
-                                    state = opts.color.yellow("differs");
-                                }
-                            }
-                            if opts.override_identical && identical && !opts.dry_run {
-                                if target.is_dir() {
-                                    // don't remove directories implicitly
-                                } else {
-                                    println!(
-                                        "{} {}",
-                                        opts.color.green("↻"),
-                                        format!(
-                                            "override identical: {} <- {}",
-                                            shorten_home(&target),
-                                            shorten_home(&path)
-                                        )
-                                    );
-                                    let _ = fs::remove_file(&target);
-                                    unix_fs::symlink(&path, &target).with_context(|| {
-                                        format!(
-                                            "Failed to symlink {} -> {}",
-                                            target.display(),
-                                            path.display()
-                                        )
-                                    })?;
-                                    planned += 1;
-                                    overrides += 1;
-                                    println!(
-                                        "{} {}",
-                                        opts.color.green("✔"),
-                                        format!(
-                                            "Linked {} -> {}",
-                                            shorten_home(&target),
-                                            shorten_home(&path)
-                                        )
-                                    );
-                                    continue;
-                                }
-                            }
-                            // If already linked, count as planned and show in dry-run/verbose; otherwise report conflict
-                            let already_symlinked = fs::symlink_metadata(&target)
-                                .ok()
-                                .map(|m| m.file_type().is_symlink())
-                                .unwrap_or(false)
-                                && fs::read_link(&target).ok().as_deref() == Some(path.as_path());
-                            if already_symlinked {
-                                planned += 1;
-                                if opts.dry_run || opts.verbose {
-                                    println!(
-                                        "{} {}",
-                                        opts.color.green("✔"),
-                                        format!(
-                                            "Would link (already in place) {} -> {}",
-                                            shorten_home(&target),
-                                            shorten_home(&path)
-                                        )
-                                    );
-                                }
-                                continue;
-                            }
+                        continue;
+                    }
+
+                    if opts.override_identical && identical && !opts.dry_run {
+                        if !target.is_dir() {
                             println!(
                                 "{} {}",
-                                &format!("{} {}", opts.color.red("✗"), opts.color.red("exists")),
-                                {
-                                    let state_str =
-                                        if (opts.dry_run || opts.verbose) && !state.is_empty() {
-                                            format!(" ({state})")
-                                        } else {
-                                            String::new()
-                                        };
-                                    format!(
-                                        "{} <- {}{}",
-                                        shorten_home(&target),
-                                        shorten_home(&path),
-                                        state_str
-                                    )
-                                }
+                                opts.color.green("↻"),
+                                format!(
+                                    "override identical: {} <- {}",
+                                    shorten_home(&target),
+                                    shorten_home(&path)
+                                )
                             );
-                            conflicts += 1;
+                            let _ = fs::remove_file(&target);
+                            if let Some(content_to_write) = decision.transform {
+                                fs::write(&target, content_to_write).with_context(|| {
+                                    format!("Failed to write transformed file {}", target.display())
+                                })?;
+                                println!(
+                                    "{} {}",
+                                    opts.color.green("✔"),
+                                    format!(
+                                        "Wrote transformed file {} from {}",
+                                        shorten_home(&target),
+                                        shorten_home(&path)
+                                    )
+                                );
+                            } else {
+                                unix_fs::symlink(&path, &target).with_context(|| {
+                                    format!(
+                                        "Failed to symlink {} -> {}",
+                                        target.display(),
+                                        path.display()
+                                    )
+                                })?;
+                                println!(
+                                    "{} {}",
+                                    opts.color.green("✔"),
+                                    format!(
+                                        "Linked {} -> {}",
+                                        shorten_home(&target),
+                                        shorten_home(&path)
+                                    )
+                                );
+                            }
+                            planned += 1;
+                            overrides += 1;
                             continue;
                         }
+                    }
+
+                    // Real conflict
+                    let mut state = String::new();
+                    if opts.dry_run || opts.verbose {
+                        state = if identical {
+                            opts.color.green("identical")
+                        } else {
+                            opts.color.yellow("differs")
+                        };
+                    }
+                    println!(
+                        "{} {}",
+                        &format!("{} {}", opts.color.red("✗"), opts.color.red("exists")),
+                        {
+                            format!(
+                                "{} <- {}{}",
+                                shorten_home(&target),
+                                shorten_home(&path),
+                                if !state.is_empty() {
+                                    format!(" ({})", state)
+                                } else {
+                                    "".to_string()
+                                }
+                            )
+                        }
+                    );
+                    conflicts += 1;
+                } else {
+                    // --- NO CONFLICT PATH (PLANNED) ---
+                    if let Some(content_to_write) = decision.transform {
+                        if opts.dry_run {
+                            println!(
+                                "{} {}",
+                                opts.color.green("✔"),
+                                format!(
+                                    "Would write transformed file {} from {}",
+                                    shorten_home(&target),
+                                    shorten_home(&path)
+                                )
+                            );
+                        } else {
+                            fs::write(&target, content_to_write).with_context(|| {
+                                format!("Failed to write transformed file {}", target.display())
+                            })?;
+                            println!(
+                                "{} {}",
+                                opts.color.green("✔"),
+                                format!(
+                                    "Wrote transformed file {} from {}",
+                                    shorten_home(&target),
+                                    shorten_home(&path)
+                                )
+                            );
+                        }
+                    } else {
                         if opts.dry_run {
                             println!(
                                 "{} {}",
@@ -356,174 +432,9 @@ fn process(root: &Path, opts: Options) -> Result<()> {
                                 )
                             );
                         }
-                        planned += 1;
-                        continue;
                     }
-                    include = decision.include; // table implies include=true by default
+                    planned += 1;
                 }
-                if !include {
-                    if opts.dry_run {
-                        println!(
-                            "{} {}",
-                            opts.color.blue("ℹ"),
-                            format!("Skipped by lua: {}", shorten_home(&home.join(&rel_path)))
-                        );
-                    }
-                    skips += 1;
-                    continue;
-                }
-
-                let target = home.join(&rel_path);
-
-                // Always create parent directories
-                if let Some(parent) = target.parent() {
-                    if !opts.dry_run {
-                        fs::create_dir_all(parent).with_context(|| {
-                            format!(
-                                "Failed to create parent directories for {}",
-                                target.display()
-                            )
-                        })?;
-                    }
-                }
-
-                // Report if target already exists
-                if target.exists() || target.is_symlink() {
-                    // If --dry-run, compare file contents where possible and report if identical
-                    let mut state = String::new();
-                    let identical: bool = (|| -> bool {
-                        let meta = fs::symlink_metadata(&target).ok();
-                        if let Some(m) = meta {
-                            if m.file_type().is_symlink() {
-                                if let Ok(link_target) = fs::read_link(&target) {
-                                    if link_target == path {
-                                        return true;
-                                    }
-                                }
-                            }
-                        }
-                        if target.is_file() && path.is_file() {
-                            if let (Ok(a), Ok(b)) = (fs::read(&target), fs::read(&path)) {
-                                return a == b;
-                            }
-                        }
-                        false
-                    })();
-                    if opts.dry_run || opts.verbose {
-                        if identical {
-                            state = opts.color.green("identical");
-                        } else {
-                            state = opts.color.yellow("differs");
-                        }
-                    }
-                    // If the existing target is already a symlink to the source, count it as linked and do not print a conflict
-                    let already_symlinked = fs::symlink_metadata(&target)
-                        .ok()
-                        .map(|m| m.file_type().is_symlink())
-                        .unwrap_or(false)
-                        && fs::read_link(&target).ok().as_deref() == Some(path.as_path());
-                    if already_symlinked {
-                        planned += 1; // count as linked
-                        if opts.dry_run || opts.verbose {
-                            println!(
-                                "{} {}",
-                                opts.color.green("✔"),
-                                format!(
-                                    "Would link (already in place) {} -> {}",
-                                    shorten_home(&target),
-                                    shorten_home(&path)
-                                )
-                            );
-                        }
-                        continue;
-                    }
-                    if opts.override_identical && identical && !opts.dry_run {
-                        if target.is_dir() {
-                            // don't remove directories implicitly
-                        } else {
-                            // If not already symlinked, perform override
-                            println!(
-                                "{} {}",
-                                opts.color.green("↻"),
-                                format!(
-                                    "override identical: {} <- {}",
-                                    shorten_home(&target),
-                                    shorten_home(&path)
-                                )
-                            );
-                            let _ = fs::remove_file(&target);
-                            unix_fs::symlink(&path, &target).with_context(|| {
-                                format!(
-                                    "Failed to symlink {} -> {}",
-                                    target.display(),
-                                    path.display()
-                                )
-                            })?;
-                            planned += 1;
-                            overrides += 1;
-                            println!(
-                                "{} {}",
-                                opts.color.green("✔"),
-                                format!(
-                                    "Linked {} -> {}",
-                                    shorten_home(&target),
-                                    shorten_home(&path)
-                                )
-                            );
-                            continue;
-                        }
-                    }
-                    // Otherwise, it's a real conflict
-                    println!(
-                        "{} {}",
-                        &format!("{} {}", opts.color.red("✗"), opts.color.red("exists")),
-                        {
-                            let state_str = if (opts.dry_run || opts.verbose) && !state.is_empty() {
-                                format!(" ({state})")
-                            } else {
-                                String::new()
-                            };
-                            format!(
-                                "{} <- {}{}",
-                                shorten_home(&target),
-                                shorten_home(&path),
-                                state_str
-                            )
-                        }
-                    );
-                    conflicts += 1;
-                    continue;
-                }
-
-                if opts.dry_run {
-                    println!(
-                        "{} {}",
-                        opts.color.green("✔"),
-                        format!(
-                            "Would symlink {} -> {}",
-                            shorten_home(&target),
-                            shorten_home(&path)
-                        )
-                    );
-                } else {
-                    unix_fs::symlink(&path, &target).with_context(|| {
-                        format!(
-                            "Failed to symlink {} -> {}",
-                            target.display(),
-                            path.display()
-                        )
-                    })?;
-                    println!(
-                        "{} {}",
-                        opts.color.green("✔"),
-                        format!(
-                            "Linked {} -> {}",
-                            shorten_home(&target),
-                            shorten_home(&path)
-                        )
-                    );
-                }
-                planned += 1;
             }
         }
         Ok(WalkCounts {
