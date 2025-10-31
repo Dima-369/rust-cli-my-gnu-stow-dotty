@@ -256,43 +256,97 @@ fn process(root: &Path, opts: Options) -> Result<()> {
                     }
                 }
 
-                // 5. Check for conflicts and process
-                if target.exists() || target.is_symlink() {
-                    // --- CONFLICT PATH ---
-                    let (identical, is_already_linked) = if let Some(content) = &decision.transform
-                    {
-                        // Transformed file identity check
-                        let is_identical = fs::read(&target)
-                            .ok()
-                            .map_or(false, |e| e == content.as_bytes());
-                        (is_identical, false)
-                    } else {
-                        // Symlink identity check
-                        let is_symlink = fs::symlink_metadata(&target)
-                            .ok()
-                            .map_or(false, |m| m.file_type().is_symlink());
-                        let link_target_matches =
-                            is_symlink && fs::read_link(&target).ok() == Some(path.to_path_buf());
-                        let content_matches = target.is_file()
-                            && path.is_file()
-                            && fs::read(&target).ok() == fs::read(&path).ok();
-                        (link_target_matches || content_matches, link_target_matches)
-                    };
+                // 5. Handle transformed files (write/override)
+                if let Some(transformed_content) = &decision.transform {
+                    if target.is_dir() {
+                        println!(
+                            "{} {}",
+                            opts.color.red("✗"),
+                            format!(
+                                "Conflict: cannot write file, target is a directory: {}",
+                                shorten_home(&target)
+                            )
+                        );
+                        conflicts += 1;
+                        continue;
+                    }
 
-                    if is_already_linked || (decision.transform.is_some() && identical) {
+                    let content_is_identical = target.is_file()
+                        && fs::read(&target).ok().as_deref()
+                            == Some(transformed_content.as_bytes());
+
+                    if content_is_identical {
                         planned += 1;
                         if opts.dry_run || opts.verbose {
-                            let action_desc = if decision.transform.is_some() {
-                                "write"
-                            } else {
-                                "link"
-                            };
                             println!(
                                 "{} {}",
                                 opts.color.green("✔"),
                                 format!(
-                                    "Would {} (already in place) {} -> {}",
-                                    action_desc,
+                                    "Would write (already in place) {} from {}",
+                                    shorten_home(&target),
+                                    shorten_home(&path)
+                                )
+                            );
+                        }
+                        continue;
+                    }
+
+                    // Content is different or target does not exist, so write/overwrite.
+                    let target_existed = target.exists();
+                    if opts.dry_run {
+                        let action = if target_existed { "overwrite" } else { "write" };
+                        println!(
+                            "{} {}",
+                            opts.color.green("✔"),
+                            format!(
+                                "Would {} transformed file {} from {}",
+                                action,
+                                shorten_home(&target),
+                                shorten_home(&path)
+                            )
+                        );
+                    } else {
+                        fs::write(&target, transformed_content).with_context(|| {
+                            format!("Failed to write transformed file {}", target.display())
+                        })?;
+                        let action_past_tense = if target_existed { "Overwrote" } else { "Wrote" };
+                        println!(
+                            "{} {}",
+                            opts.color.green("✔"),
+                            format!(
+                                "{} transformed file {} from {}",
+                                action_past_tense,
+                                shorten_home(&target),
+                                shorten_home(&path)
+                            )
+                        );
+                    }
+                    planned += 1;
+                    continue; // Done with this transformed file.
+                }
+
+                // 6. Handle symlinks
+                if target.exists() || target.is_symlink() {
+                    // --- CONFLICT PATH ---
+                    let is_symlink = fs::symlink_metadata(&target)
+                        .ok()
+                        .map_or(false, |m| m.file_type().is_symlink());
+                    let link_target_matches =
+                        is_symlink && fs::read_link(&target).ok() == Some(path.to_path_buf());
+                    let content_matches = target.is_file()
+                        && !is_symlink
+                        && path.is_file()
+                        && fs::read(&target).ok() == fs::read(&path).ok();
+                    let identical = link_target_matches || content_matches;
+
+                    if link_target_matches {
+                        planned += 1;
+                        if opts.dry_run || opts.verbose {
+                            println!(
+                                "{} {}",
+                                opts.color.green("✔"),
+                                format!(
+                                    "Would link (already in place) {} -> {}",
                                     shorten_home(&target),
                                     shorten_home(&path)
                                 )
@@ -313,37 +367,22 @@ fn process(root: &Path, opts: Options) -> Result<()> {
                                 )
                             );
                             let _ = fs::remove_file(&target);
-                            if let Some(content_to_write) = decision.transform {
-                                fs::write(&target, content_to_write).with_context(|| {
-                                    format!("Failed to write transformed file {}", target.display())
-                                })?;
-                                println!(
-                                    "{} {}",
-                                    opts.color.green("✔"),
-                                    format!(
-                                        "Wrote transformed file {} from {}",
-                                        shorten_home(&target),
-                                        shorten_home(&path)
-                                    )
-                                );
-                            } else {
-                                unix_fs::symlink(&path, &target).with_context(|| {
-                                    format!(
-                                        "Failed to symlink {} -> {}",
-                                        target.display(),
-                                        path.display()
-                                    )
-                                })?;
-                                println!(
-                                    "{} {}",
-                                    opts.color.green("✔"),
-                                    format!(
-                                        "Linked {} -> {}",
-                                        shorten_home(&target),
-                                        shorten_home(&path)
-                                    )
-                                );
-                            }
+                            unix_fs::symlink(&path, &target).with_context(|| {
+                                format!(
+                                    "Failed to symlink {} -> {}",
+                                    target.display(),
+                                    path.display()
+                                )
+                            })?;
+                            println!(
+                                "{} {}",
+                                opts.color.green("✔"),
+                                format!(
+                                    "Linked {} -> {}",
+                                    shorten_home(&target),
+                                    shorten_home(&path)
+                                )
+                            );
                             planned += 1;
                             overrides += 1;
                             continue;
@@ -377,61 +416,34 @@ fn process(root: &Path, opts: Options) -> Result<()> {
                     );
                     conflicts += 1;
                 } else {
-                    // --- NO CONFLICT PATH (PLANNED) ---
-                    if let Some(content_to_write) = decision.transform {
-                        if opts.dry_run {
-                            println!(
-                                "{} {}",
-                                opts.color.green("✔"),
-                                format!(
-                                    "Would write transformed file {} from {}",
-                                    shorten_home(&target),
-                                    shorten_home(&path)
-                                )
-                            );
-                        } else {
-                            fs::write(&target, content_to_write).with_context(|| {
-                                format!("Failed to write transformed file {}", target.display())
-                            })?;
-                            println!(
-                                "{} {}",
-                                opts.color.green("✔"),
-                                format!(
-                                    "Wrote transformed file {} from {}",
-                                    shorten_home(&target),
-                                    shorten_home(&path)
-                                )
-                            );
-                        }
+                    // --- NO CONFLICT PATH (PLANNED for symlink) ---
+                    if opts.dry_run {
+                        println!(
+                            "{} {}",
+                            opts.color.green("✔"),
+                            format!(
+                                "Would symlink {} -> {}",
+                                shorten_home(&target),
+                                shorten_home(&path)
+                            )
+                        );
                     } else {
-                        if opts.dry_run {
-                            println!(
-                                "{} {}",
-                                opts.color.green("✔"),
-                                format!(
-                                    "Would symlink {} -> {}",
-                                    shorten_home(&target),
-                                    shorten_home(&path)
-                                )
-                            );
-                        } else {
-                            unix_fs::symlink(&path, &target).with_context(|| {
-                                format!(
-                                    "Failed to symlink {} -> {}",
-                                    target.display(),
-                                    path.display()
-                                )
-                            })?;
-                            println!(
-                                "{} {}",
-                                opts.color.green("✔"),
-                                format!(
-                                    "Linked {} -> {}",
-                                    shorten_home(&target),
-                                    shorten_home(&path)
-                                )
-                            );
-                        }
+                        unix_fs::symlink(&path, &target).with_context(|| {
+                            format!(
+                                "Failed to symlink {} -> {}",
+                                target.display(),
+                                path.display()
+                            )
+                        })?;
+                        println!(
+                            "{} {}",
+                            opts.color.green("✔"),
+                            format!(
+                                "Linked {} -> {}",
+                                shorten_home(&target),
+                                shorten_home(&path)
+                            )
+                        );
                     }
                     planned += 1;
                 }
