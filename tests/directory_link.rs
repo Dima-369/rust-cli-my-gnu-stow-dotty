@@ -49,9 +49,7 @@ fn actual_run_directory_link_creates_symlink() {
         .arg("--no-color");
     cmd.env("HOME", &home);
 
-    cmd.assert()
-        .success()
-        .stdout(contains("Linked dir"));
+    cmd.assert().success().stdout(contains("Linked dir"));
 
     // Verify the symlink was created
     let target = home.join("mydir");
@@ -132,9 +130,7 @@ fn directory_link_with_rename() {
         .arg("--no-color");
     cmd.env("HOME", &home);
 
-    cmd.assert()
-        .success()
-        .stdout(contains("Linked dir"));
+    cmd.assert().success().stdout(contains("Linked dir"));
 
     let target = home.join(".my-hidden-dir");
     assert!(target.is_symlink());
@@ -162,7 +158,9 @@ fn directory_skipped_by_lua_returning_false() {
     cmd.assert()
         .success()
         .stdout(contains("Skipped by lua"))
-        .stdout(contains("Summary: 0 planned, 0 conflicts, 1 skipped by lua"));
+        .stdout(contains(
+            "Summary: 0 planned, 0 conflicts, 1 skipped by lua",
+        ));
 }
 
 #[test]
