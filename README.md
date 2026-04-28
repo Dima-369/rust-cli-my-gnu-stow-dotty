@@ -7,9 +7,10 @@ Those Lua files can return:
 
 - `true` to indicate that the file should be linked
 - `false` to indicate that the file should not be linked
-- a table with 1 or 2 keys:
+- a table with 1 or more keys:
     - `rename_to`: a string to indicate that the file should be linked or written to a different file name.
     - `transform`: a function that receives the original file content as a string and must return a new string. If provided, `dotty` will write a new file with the transformed content instead of creating a symlink.
+    - `link`: (for directories only) a boolean. When `true`, the entire directory is symlinked as a single symlink instead of recursing into it.
 
 # Example Lua file
 
@@ -57,3 +58,27 @@ return {
 ```
 
 When `dotty` runs, it will create a file at `~/.gitconfig` with the email address replaced, instead of creating a symlink.
+
+# Example Lua file with `link` (directory symlink)
+
+If you have a directory `nvim/` in your dotty root and you want to symlink the entire directory instead of its individual files:
+
+**`nvim.lua` (in dotty root):**
+```lua
+return {
+  link = true
+}
+```
+
+This creates a symlink `~/.config/nvim -> /path/to/dotty/nvim` (a single symlink for the whole directory).
+
+You can combine `link` with `rename_to`:
+
+```lua
+return {
+  link = true,
+  rename_to = ".my-nvim-config"
+}
+```
+
+Without the `link` key, directories are recursed into and individual files are symlinked.
